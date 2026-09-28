@@ -7,3 +7,19 @@ venv/
 *.log
 *.bak-*
 .DS_Store
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
+
+# Local agent-integration scaffolding (beads/codex/cursor/claude) — not part of the harness
+.agents/
+.beads/
+.claude/
+.codex/
+.cursor/
+CLAUDE.md
+AGENTS.md
