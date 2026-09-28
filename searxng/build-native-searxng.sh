@@ -2,8 +2,9 @@
 # build-native-searxng.sh — install SearXNG as a plain Python venv (NO container).
 #
 # Produces ~/tools/searxng-native/{venv,searxng-src,settings.yml} bound to a
-# FIXED 127.0.0.1:8888 with the JSON API enabled. ~140 MB total vs a ~7–12 GB
-# container image. Idempotent: re-running reuses an existing checkout/venv.
+# FIXED 127.0.0.1:8888 with the JSON API enabled. ~140 MB on disk and ~70–120 MB
+# resident, vs several GB of container disk plus a 1 GiB-default VM (the image
+# itself is only ~96 MB compressed). Idempotent: re-running reuses an existing checkout/venv.
 #
 # After this, load the LaunchAgent (macOS) — see com.example.searxng-native.plist.template
 # and the README — or run it directly:  ~/tools/searxng-native/venv/bin/python -m searx.webapp

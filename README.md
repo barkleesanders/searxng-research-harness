@@ -20,6 +20,14 @@ it transparently moves to the next. Piped output is JSON; interactive output is
 human-readable. Typed exit codes: `0` results, `2` usage error, `3` all providers
 exhausted, `4` no usable keys.
 
+## Cooldown
+
+A provider that answers 402, 429, or 432 (quota exhausted) is moved to the end of
+the order for 15 minutes, recorded in `~/.cache/websearch/cooldown.json`. It is still
+tried as a last resort, so a cooldown never turns into a false "all providers
+failed". `-p`/`--order` ignore it; `--no-cooldown` skips it for one run;
+`WEBSEARCH_COOLDOWN_MIN=0` turns it off. `websearch keys` shows what is cooling down.
+
 ## Provider order
 
 ```
@@ -59,7 +67,7 @@ cp keys.json.example ~/.config/websearch/keys.json  # then fill in what you have
 ## Self-hosted SearXNG (native, no container)
 
 `searxng/build-native-searxng.sh` installs SearXNG into `~/tools/searxng-native/`
-(a venv + a shallow git checkout, ~140 MB total) with the JSON API enabled and a
+(a venv + a shallow git checkout, ~140 MB on disk, ~70–120 MB resident) with the JSON API enabled and a
 **fixed** bind on `127.0.0.1:8888`. Because the address is fixed, `SEARXNG_URL` never
 rots — unlike a container whose IP can change on every restart.
 

@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 // websearch — stacked free-tier web search with automatic failover.
 //
-// Tries multiple providers in priority order. On quota exhaustion (HTTP 402/429)
-// or a transient error, it falls through to the next provider. Designed to be
+// Tries multiple providers in priority order. On quota exhaustion (HTTP 402/429/432)
+// or a transient error, it falls through to the next provider. An exhausted
+// provider is put on a cooldown (default 15 min, persisted in
+// ~/.cache/websearch/cooldown.json) and tried last until it expires, so a dead
+// monthly cap stops costing a round-trip on every search. Designed to be
 // called by skills/hooks during autonomous research so a single provider's
 // monthly cap never blocks the work.
 //
@@ -18,17 +21,17 @@
 // Exa key also auto-read from ~/.claude.json mcpServers.exa if EXA_API_KEY unset.
 // TinyFish key also auto-read from ~/.tinyfish/config.json {api_key} if TINYFISH_API_KEY unset.
 
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const HOME = homedir();
 // searxng first: self-hosted, keyless, UNMETERED — absorbs volume so the metered
 // free tiers below are preserved for when they matter. Falls through instantly
-// (connection refused) if the container isn't up.
+// (connection refused) if the service isn't up.
 // TinyFish/marginalia last: independent indexes, not the default first hop.
-// Order after searxng is by RECURRING free allowance, largest first: parallel
-// (~5,000/mo), linkup (~4,000/mo), youcom (100/DAY ~ 3,000/mo) all come before the
+// Order after searxng is by RECURRING free allowance, largest first: linkup
+// (~4,000/mo), parallel (~5,000/mo), youcom (100/DAY ~ 3,000/mo) all come before the
 // ~1,000/mo tiers, so the small caps are spent last. A provider with no key is
 // skipped entirely, so an unkeyed entry here is inert.
 const DEFAULT_ORDER = [
@@ -126,8 +129,9 @@ async function doFetch(url, opts, timeoutMs) {
   }
 }
 
-function classify(status, bodyText) {
-  if (status === 402 || status === 429) return 'exhausted';
+function classify(status) {
+  // 432 = Tavily's "exceeds your plan's set usage limit" (observed 2026-08-20).
+  if (status === 402 || status === 429 || status === 432) return 'exhausted';
   if (status === 401 || status === 403) return 'auth';
   return 'transient';
 }
@@ -470,7 +474,7 @@ const KEY_ENV = {
 
 // ----------------------------------------------------------------------- args
 function parseArgs(argv) {
-  const o = { num: 5, order: null, provider: null, json: null, timeout: 15000, quiet: false, query: [] };
+  const o = { num: 5, order: null, provider: null, json: null, timeout: 15000, quiet: false, cooldown: true, query: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-n' || a === '--num') o.num = Math.max(1, parseInt(argv[++i], 10) || 5);
@@ -480,6 +484,7 @@ function parseArgs(argv) {
     else if (a === '--pretty') o.json = false;
     else if (a === '--timeout') o.timeout = Math.max(1000, parseInt(argv[++i], 10) || 15000);
     else if (a === '--quiet' || a === '-q') o.quiet = true;
+    else if (a === '--no-cooldown') o.cooldown = false;
     else if (a === '-h' || a === '--help') o.help = true;
     else if (a === 'keys') o.cmd = 'keys';
     else if (a.startsWith('-')) {
@@ -498,22 +503,55 @@ USAGE
 
 OPTIONS
   -n, --num N        results to return (default 5)
-  -p, --provider P   force one provider (tavily|brave|jina|exa|tinyfish)
+  -p, --provider P   force one provider (searxng|linkup|parallel|youcom|tavily|
+                     brave|jina|exa|tinyfish|marginalia); ignores cooldown
       --order a,b,c  override priority order
       --json         force JSON output (default when piped/non-TTY)
       --pretty       force human output (default when interactive)
       --timeout MS   per-provider timeout (default 15000)
   -q, --quiet        suppress provider-attempt breadcrumbs on stderr
+      --no-cooldown  try exhausted providers in normal order this run
+
+COOLDOWN     A provider that returns 402/429/432 is moved to the END of the
+             order for WEBSEARCH_COOLDOWN_MIN minutes (default 15; 0 disables).
+             It is still tried as a last resort, never silently dropped.
   -h, --help
 
 EXIT CODES   0 ok · 2 usage · 3 all providers exhausted · 4 no keys
-KEYS         env TAVILY_API_KEY BRAVE_API_KEY JINA_API_KEY EXA_API_KEY TINYFISH_API_KEY
+KEYS         env SEARXNG_URL LINKUP_API_KEY PARALLEL_API_KEY YDC_API_KEY TAVILY_API_KEY
+             BRAVE_API_KEY JINA_API_KEY EXA_API_KEY TINYFISH_API_KEY (marginalia: none)
              or ~/.config/websearch/keys.json
              Exa auto-read from ~/.claude.json; TinyFish from ~/.tinyfish/config.json
 
 EXAMPLE (skill/hook)
   websearch "latest claude opus pricing" -n 5 --json
   websearch "breaking news" -p tinyfish -n 8 --json`;
+
+// ------------------------------------------------------------------- cooldown
+const CACHE_DIR = process.env.XDG_CACHE_HOME || join(HOME, '.cache');
+const COOLDOWN_FILE = join(CACHE_DIR, 'websearch', 'cooldown.json');
+const COOLDOWN_MS = (() => {
+  const m = Number.parseFloat(process.env.WEBSEARCH_COOLDOWN_MIN ?? '15');
+  return Number.isFinite(m) && m > 0 ? m * 60_000 : 0;
+})();
+
+function readCooldown() {
+  try {
+    const j = JSON.parse(readFileSync(COOLDOWN_FILE, 'utf8'));
+    return j && typeof j === 'object' ? j : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeCooldown(state) {
+  try {
+    mkdirSync(dirname(COOLDOWN_FILE), { recursive: true });
+    writeFileSync(COOLDOWN_FILE, `${JSON.stringify(state, null, 2)}\n`);
+  } catch {
+    // Cooldown is an optimization; never fail a search because the cache is unwritable.
+  }
+}
 
 // ----------------------------------------------------------------------- main
 const opts = parseArgs(process.argv.slice(2));
@@ -533,7 +571,9 @@ if (opts.cmd === 'keys') {
   const rows = DEFAULT_ORDER.map((p) => {
     const keyless = KEYLESS.has(p);
     const have = keyless || !!keys[KEY_ENV[p]];
-    const note = keyless ? 'keyless' : have ? 'key set' : `no key  → ${SIGNUP[p]}`;
+    let note = keyless ? 'keyless' : have ? 'key set' : `no key  → ${SIGNUP[p]}`;
+    const until = readCooldown()[p];
+    if (have && until > Date.now()) note += `  (cooling down ${Math.ceil((until - Date.now()) / 60_000)} min)`;
     return `  ${have ? '✓' : '·'} ${p.padEnd(10)} ${note}`;
   });
   const n = DEFAULT_ORDER.filter((p) => KEYLESS.has(p) || keys[KEY_ENV[p]]).length;
@@ -559,19 +599,46 @@ if (usable.length === 0) {
   process.exit(4);
 }
 
+// Exhausted providers (still inside their cooldown) go to the end of the order, so a
+// dead monthly cap stops costing a round-trip on every search. They are demoted, never
+// dropped: if everything else fails they are still tried. An explicit -p/--order is
+// the caller's choice and is honored as-is.
+const now = Date.now();
+const cooldown = COOLDOWN_MS ? readCooldown() : {};
+const cooling = (p) => cooldown[p] > now;
+const explicit = !!(opts.provider || opts.order);
+const tryOrder =
+  opts.cooldown && COOLDOWN_MS && !explicit
+    ? [...usable.filter((p) => !cooling(p)), ...usable.filter(cooling)]
+    : usable;
+const coolingSet = new Set(tryOrder.filter(cooling));
+let cooldownDirty = false;
+const setCooldown = (p, until) => {
+  if (!COOLDOWN_MS) return;
+  if (until) cooldown[p] = until;
+  else if (p in cooldown) delete cooldown[p];
+  else return;
+  cooldownDirty = true;
+};
+const flushCooldown = () => {
+  if (cooldownDirty) writeCooldown(cooldown);
+};
+
 const attempts = [];
-for (const p of usable) {
-  log(`→ ${p}… `);
+for (const p of tryOrder) {
+  log(`→ ${p}${coolingSet.has(p) ? ' (cooling down)' : ''}… `);
   try {
     const results = await PROVIDERS[p](query, opts.num, keys[KEY_ENV[p]], opts.timeout);
     log(`✓ ${results.length} result(s)\n`);
+    setCooldown(p, 0);
     // A provider that returns ZERO results is NOT a success — it silently ended the
     // search and the caller saw "the web has nothing". Fall through to the next
     // provider; only accept an empty answer once every provider has been tried.
-    if (results.length === 0 && p !== usable[usable.length - 1]) {
+    if (results.length === 0 && p !== tryOrder[tryOrder.length - 1]) {
       attempts.push({ provider: p, kind: 'empty', status: 200, message: '0 results' });
       continue;
     }
+    flushCooldown();
     const payload = { query, provider: p, count: results.length, attempts, results };
     if (wantJson) {
       process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
@@ -588,11 +655,13 @@ for (const p of usable) {
     const tag = e.kind === 'exhausted' ? 'exhausted' : e.kind === 'auth' ? 'bad key' : 'error';
     log(`✗ ${tag}${e.status ? ` (${e.status})` : ''}\n`);
     attempts.push({ provider: p, kind: e.kind, status: e.status, message: e.message });
+    if (e.kind === 'exhausted') setCooldown(p, Date.now() + COOLDOWN_MS);
     // auth failures and exhaustion both → just move on to the next provider.
   }
 }
 
 // Every usable provider failed.
+flushCooldown();
 const summary = { query, error: 'all_providers_failed', attempts };
 if (wantJson) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 else {
