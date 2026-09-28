@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- macOS LaunchAgent for native SearXNG. Replace __HOME__ with your home dir
+     (e.g. /Users/you), save to ~/Library/LaunchAgents/com.example.searxng-native.plist,
+     then:  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.searxng-native.plist
+     RunAtLoad + KeepAlive => starts at login and auto-restarts on crash. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.searxng-native</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/tools/searxng-native/venv/bin/python</string>
+    <string>-m</string>
+    <string>searx.webapp</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SEARXNG_SETTINGS_PATH</key><string>__HOME__/tools/searxng-native/settings.yml</string>
+  </dict>
+  <key>WorkingDirectory</key><string>__HOME__/tools/searxng-native/searxng-src</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/tools/searxng-native/searxng-native.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/tools/searxng-native/searxng-native.log</string>
+</dict>
+</plist>

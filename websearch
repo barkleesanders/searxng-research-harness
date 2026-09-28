@@ -1,0 +1,602 @@
+#!/usr/bin/env node
+// websearch — stacked free-tier web search with automatic failover.
+//
+// Tries multiple providers in priority order. On quota exhaustion (HTTP 402/429)
+// or a transient error, it falls through to the next provider. Designed to be
+// called by skills/hooks during autonomous research so a single provider's
+// monthly cap never blocks the work.
+//
+// Agent-native: emits JSON automatically when stdout is not a TTY (piped),
+// pretty text when run interactively. Typed exit codes:
+//   0 = results returned   2 = usage error
+//   3 = all providers failed/exhausted   4 = no usable API keys configured
+//
+// Keys (env, or ~/.config/websearch/keys.json {"TAVILY_API_KEY":"…"}):
+//   SEARXNG_URL  LINKUP_API_KEY  PARALLEL_API_KEY  YDC_API_KEY (you.com)
+//   TAVILY_API_KEY  BRAVE_API_KEY  JINA_API_KEY  EXA_API_KEY  TINYFISH_API_KEY
+// marginalia needs no key. Add/replace any of these with: ~/tools/websearch/add-key.sh <provider>
+// Exa key also auto-read from ~/.claude.json mcpServers.exa if EXA_API_KEY unset.
+// TinyFish key also auto-read from ~/.tinyfish/config.json {api_key} if TINYFISH_API_KEY unset.
+
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+const HOME = homedir();
+// searxng first: self-hosted, keyless, UNMETERED — absorbs volume so the metered
+// free tiers below are preserved for when they matter. Falls through instantly
+// (connection refused) if the container isn't up.
+// TinyFish/marginalia last: independent indexes, not the default first hop.
+// Order after searxng is by RECURRING free allowance, largest first: parallel
+// (~5,000/mo), linkup (~4,000/mo), youcom (100/DAY ~ 3,000/mo) all come before the
+// ~1,000/mo tiers, so the small caps are spent last. A provider with no key is
+// skipped entirely, so an unkeyed entry here is inert.
+const DEFAULT_ORDER = [
+  'searxng',
+  'linkup',
+  'parallel',
+  'youcom',
+  'tavily',
+  'brave',
+  'jina',
+  'exa',
+  'tinyfish',
+  'marginalia',
+];
+
+// Providers that need no credential at all (gated on reachability, not a key).
+const KEYLESS = new Set(['marginalia']);
+
+const SIGNUP = {
+  searxng: 'self-host, unmetered: see ~/tools/searxng-local/ then set SEARXNG_URL',
+  linkup: 'https://app.linkup.so  (free $20/mo credit ≈ 4,000 searches; pro email)',
+  parallel: 'https://platform.parallel.ai  (free ~5,000 req/mo; $5 credit/mo)',
+  youcom: 'https://you.com/platform  (free 100 queries/DAY, no card, + $100 credit)',
+  tavily: 'https://app.tavily.com  (free 1,000 credits/mo, resets the 1st)',
+  brave: 'https://api-dashboard.search.brave.com  (free $5 credit/mo ≈ 1,000 req)',
+  jina: 'https://jina.ai/api-dashboard/  (free tokens per key; 402 = balance empty)',
+  exa: 'https://dashboard.exa.ai  (free ~1,000 searches/mo)',
+  tinyfish: 'https://agent.tinyfish.ai/api-keys  (or: tinyfish auth login --source cli)',
+  marginalia: 'no key needed — public independent index (CC-BY-NC-SA)',
+};
+
+// ---------------------------------------------------------------- key loading
+function loadKeys() {
+  const keys = { ...process.env };
+  // Optional keys file (does not override real env vars).
+  try {
+    const f = JSON.parse(readFileSync(join(HOME, '.config/websearch/keys.json'), 'utf8'));
+    for (const [k, v] of Object.entries(f)) if (!keys[k] && v) keys[k] = v;
+  } catch {
+    /* no keys file — fine */
+  }
+  // Fall back to the Exa key already wired into Claude's MCP config.
+  if (!keys.EXA_API_KEY) {
+    try {
+      const cc = JSON.parse(readFileSync(join(HOME, '.claude.json'), 'utf8'));
+      const stack = [cc];
+      while (stack.length) {
+        const o = stack.pop();
+        if (o && typeof o === 'object') {
+          const url = o?.mcpServers?.exa?.url;
+          if (typeof url === 'string') {
+            const m = url.match(/exaApiKey=([0-9a-f-]{8,})/i);
+            if (m) {
+              keys.EXA_API_KEY = m[1];
+              break;
+            }
+          }
+          for (const v of Object.values(o)) if (v && typeof v === 'object') stack.push(v);
+        }
+      }
+    } catch {
+      /* no claude config — fine */
+    }
+  }
+  // TinyFish CLI stores key at ~/.tinyfish/config.json {"api_key":"sk-tinyfish-…"}.
+  if (!keys.TINYFISH_API_KEY) {
+    try {
+      const tf = JSON.parse(readFileSync(join(HOME, '.tinyfish', 'config.json'), 'utf8'));
+      const k = tf.api_key || tf.apiKey || tf.TINYFISH_API_KEY;
+      if (typeof k === 'string' && k.trim()) keys.TINYFISH_API_KEY = k.trim();
+    } catch {
+      /* no tinyfish config — fine */
+    }
+  }
+  return keys;
+}
+
+// ------------------------------------------------------------------ providers
+// Each adapter: async (query, num, key, timeoutMs) -> normalized results array.
+// Throws { kind: 'exhausted' | 'auth' | 'transient', status, message } on failure.
+
+function providerError(kind, status, message) {
+  return { kind, status, message };
+}
+
+async function doFetch(url, opts, timeoutMs) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } catch (e) {
+    throw providerError('transient', 0, e.name === 'AbortError' ? 'timeout' : String(e.message || e));
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function classify(status, bodyText) {
+  if (status === 402 || status === 429) return 'exhausted';
+  if (status === 401 || status === 403) return 'auth';
+  return 'transient';
+}
+
+const PROVIDERS = {
+  // Self-hosted SearXNG — meta-search over Google/Brave/DDG/etc. Keyless and
+  // unmetered; `key` here is the instance base URL (SEARXNG_URL).
+  // Requires `search.formats: [html, json]` in settings.yml — a public instance
+  // with JSON disabled answers 403, which we surface as an auth-kind failure.
+  async searxng(query, num, key, timeoutMs) {
+    const base = String(key).replace(/\/+$/, '');
+    const u = new URL(`${base}/search`);
+    u.searchParams.set('q', query);
+    u.searchParams.set('format', 'json');
+    const r = await doFetch(u, { headers: { Accept: 'application/json' } }, timeoutMs);
+    const text = await r.text();
+    if (!r.ok) {
+      // 403 here almost always means json isn't in search.formats.
+      const hint = r.status === 403 ? 'format=json disabled (see search.formats in settings.yml)' : text.slice(0, 200);
+      throw providerError(r.status === 403 ? 'auth' : classify(r.status), r.status, hint);
+    }
+    let j;
+    try {
+      j = JSON.parse(text);
+    } catch {
+      // Docs say a disabled format 403s, but real instances (e.g. searx.be)
+      // answer 200 with the HTML page instead — same root cause, so say so.
+      const looksHtml = /^\s*</.test(text);
+      throw providerError(
+        'auth',
+        r.status,
+        looksHtml
+          ? 'instance returned HTML, not JSON — add json to search.formats in settings.yml'
+          : 'invalid JSON from searxng',
+      );
+    }
+    return (j.results || []).slice(0, num).map((x) => ({
+      title: x.title || '',
+      url: x.url || '',
+      snippet: (x.content || '').replace(/\s+/g, ' ').trim(),
+      published: x.publishedDate || null,
+      engines: x.engines || undefined, // which upstream engines returned this hit
+      source: 'searxng',
+    }));
+  },
+
+  // Linkup — https://api.linkup.so/v1/openapi.json (retrieved 2026-08-27).
+  // Required body: q, depth, outputType. depth "standard" = single-iteration
+  // agentic search at $0.005; "deep" is 10x the price, so never default to it.
+  // outputType "searchResults" -> [{name, url, content}].
+  async linkup(query, num, key, timeoutMs) {
+    const r = await doFetch(
+      'https://api.linkup.so/v1/search',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          q: query,
+          depth: 'standard',
+          outputType: 'searchResults',
+          maxResults: num,
+        }),
+      },
+      timeoutMs,
+    );
+    const text = await r.text();
+    if (!r.ok) throw providerError(classify(r.status), r.status, text.slice(0, 200));
+    let j;
+    try {
+      j = JSON.parse(text);
+    } catch {
+      throw providerError('transient', r.status, 'invalid JSON from linkup');
+    }
+    return (j.results || []).slice(0, num).map((x) => ({
+      title: x.name || '',
+      url: x.url || '',
+      snippet: (x.content || '').replace(/\s+/g, ' ').trim().slice(0, 400),
+      published: null,
+      source: 'linkup',
+    }));
+  },
+
+  // Parallel — https://docs.parallel.ai/search/search-quickstart (retrieved 2026-08-27).
+  // POST /v1/search with x-api-key. mode "fast" and "turbo" both bill at $1/1k
+  // (vs $5/1k for basic/advanced), so "fast" is the free-tier sweet spot.
+  // The body accepts ONLY objective / search_queries / mode — anything else
+  // (e.g. max_results) is rejected 422 "extra_forbidden", NOT 401. A 422 here
+  // means the key is fine and the BODY is wrong.
+  // Response: {search_id, results:[{url, title, publish_date, excerpts[]}]}.
+  async parallel(query, num, key, timeoutMs) {
+    const r = await doFetch(
+      'https://api.parallel.ai/v1/search',
+      {
+        method: 'POST',
+        headers: { 'x-api-key': key, 'Content-Type': 'application/json' },
+        // NO max_results — the API rejects it with 422 extra_forbidden
+        // (measured 2026-08-27). Result count is trimmed client-side below.
+        body: JSON.stringify({
+          objective: query,
+          search_queries: [query],
+          mode: 'fast',
+        }),
+      },
+      timeoutMs,
+    );
+    const text = await r.text();
+    if (!r.ok) throw providerError(classify(r.status), r.status, text.slice(0, 200));
+    let j;
+    try {
+      j = JSON.parse(text);
+    } catch {
+      throw providerError('transient', r.status, 'invalid JSON from parallel');
+    }
+    return (j.results || []).slice(0, num).map((x) => ({
+      title: x.title || '',
+      url: x.url || '',
+      // excerpts is an ARRAY of passages, not a string — join before trimming.
+      snippet: (Array.isArray(x.excerpts) ? x.excerpts.join(' ') : x.excerpts || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 400),
+      published: x.publish_date || null,
+      source: 'parallel',
+    }));
+  },
+
+  // You.com — https://you.com/docs/quickstart + /pricing (retrieved 2026-08-27).
+  // The only provider here with a RECURRING DAILY free allowance: 100 queries/day
+  // with no card, plus $100 of starting credit. GET /v1/search, header X-API-Key.
+  // Response nests under results.web (NOT a flat results array).
+  //
+  // HOST: api.you.com — NOT api.ydc-index.io. The docs still reference ydc-index.io,
+  // but that legacy host rejects the current `ydc-sk-…` platform keys with 403
+  // (measured 2026-08-27: same key, 403 on ydc-index.io vs 200 on api.you.com).
+  async youcom(query, num, key, timeoutMs) {
+    const u = new URL('https://api.you.com/v1/search');
+    u.searchParams.set('query', query);
+    u.searchParams.set('count', String(Math.min(num, 20)));
+    const r = await doFetch(u, { headers: { 'X-API-Key': key, Accept: 'application/json' } }, timeoutMs);
+    const text = await r.text();
+    if (!r.ok) throw providerError(classify(r.status), r.status, text.slice(0, 200));
+    let j;
+    try {
+      j = JSON.parse(text);
+    } catch {
+      throw providerError('transient', r.status, 'invalid JSON from youcom');
+    }
+    const web = j.results?.web || j.hits || [];
+    return web.slice(0, num).map((x) => ({
+      title: x.title || '',
+      url: x.url || '',
+      // snippets is an array of query-relevant extracts; description is the fallback.
+      snippet: (Array.isArray(x.snippets) && x.snippets.length ? x.snippets.join(' ') : x.description || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 400),
+      published: x.page_age || null,
+      source: 'youcom',
+    }));
+  },
+
+  // Marginalia — independent crawler indexing the small/non-commercial web.
+  // Keyless public endpoint; complements the mainstream indexes rather than
+  // duplicating them. Results are CC-BY-NC-SA.
+  async marginalia(query, num, _key, timeoutMs) {
+    const r = await doFetch(
+      `https://api.marginalia.nu/public/search/${encodeURIComponent(query)}`,
+      { headers: { Accept: 'application/json' } },
+      timeoutMs,
+    );
+    const text = await r.text();
+    if (!r.ok) throw providerError(classify(r.status), r.status, text.slice(0, 200));
+    let j;
+    try {
+      j = JSON.parse(text);
+    } catch {
+      throw providerError('transient', r.status, 'invalid JSON from marginalia');
+    }
+    return (j.results || []).slice(0, num).map((x) => ({
+      title: x.title || '',
+      url: x.url || '',
+      snippet: (x.description || '').replace(/\s+/g, ' ').trim(),
+      published: null,
+      source: 'marginalia',
+    }));
+  },
+
+  async tavily(query, num, key, timeoutMs) {
+    const r = await doFetch(
+      'https://api.tavily.com/search',
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, max_results: num, include_answer: false }),
+      },
+      timeoutMs,
+    );
+    const text = await r.text();
+    if (!r.ok) throw providerError(classify(r.status), r.status, text.slice(0, 200));
+    const j = JSON.parse(text);
+    return (j.results || []).slice(0, num).map((x) => ({
+      title: x.title || '',
+      url: x.url || '',
+      snippet: (x.content || '').trim(),
+      published: x.published_date || null,
+      source: 'tavily',
+    }));
+  },
+
+  async brave(query, num, key, timeoutMs) {
+    const u = new URL('https://api.search.brave.com/res/v1/web/search');
+    u.searchParams.set('q', query);
+    u.searchParams.set('count', String(Math.min(num, 20)));
+    const r = await doFetch(
+      u,
+      {
+        headers: {
+          'X-Subscription-Token': key,
+          Accept: 'application/json',
+          'Accept-Encoding': 'gzip',
+        },
+      },
+      timeoutMs,
+    );
+    const text = await r.text();
+    if (!r.ok) throw providerError(classify(r.status), r.status, text.slice(0, 200));
+    const j = JSON.parse(text);
+    return (j.web?.results || []).slice(0, num).map((x) => ({
+      title: x.title || '',
+      url: x.url || '',
+      snippet: (x.description || '').replace(/<[^>]+>/g, '').trim(),
+      published: x.page_age || null,
+      source: 'brave',
+    }));
+  },
+
+  async jina(query, num, key, timeoutMs) {
+    const r = await doFetch(
+      `https://s.jina.ai/?q=${encodeURIComponent(query)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${key}`,
+          Accept: 'application/json',
+          'X-Respond-With': 'no-content', // metadata only — cheaper, fewer tokens
+        },
+      },
+      timeoutMs,
+    );
+    const text = await r.text();
+    if (!r.ok) throw providerError(classify(r.status), r.status, text.slice(0, 200));
+    const j = JSON.parse(text);
+    const arr = Array.isArray(j) ? j : j.data || [];
+    return arr.slice(0, num).map((x) => ({
+      title: x.title || '',
+      url: x.url || '',
+      snippet: (x.description || x.content || '').slice(0, 300).trim(),
+      published: x.date || null,
+      source: 'jina',
+    }));
+  },
+
+  async exa(query, num, key, timeoutMs) {
+    const r = await doFetch(
+      'https://api.exa.ai/search',
+      {
+        method: 'POST',
+        headers: { 'x-api-key': key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query,
+          numResults: num,
+          contents: { text: { maxCharacters: 300 } },
+        }),
+      },
+      timeoutMs,
+    );
+    const text = await r.text();
+    if (!r.ok) throw providerError(classify(r.status), r.status, text.slice(0, 200));
+    const j = JSON.parse(text);
+    return (j.results || []).slice(0, num).map((x) => ({
+      title: x.title || '',
+      url: x.url || '',
+      snippet: (x.text || '').replace(/\s+/g, ' ').slice(0, 300).trim(),
+      published: x.publishedDate || null,
+      source: 'exa',
+    }));
+  },
+
+  async tinyfish(query, num, key, timeoutMs) {
+    // Live web index; geo/lang hints via env (optional).
+    // Docs: GET https://api.search.tinyfish.ai?query=…&location=…&language=…
+    const u = new URL('https://api.search.tinyfish.ai');
+    u.searchParams.set('query', query);
+    u.searchParams.set('location', process.env.TINYFISH_LOCATION || 'US');
+    u.searchParams.set('language', process.env.TINYFISH_LANGUAGE || 'en');
+    const r = await doFetch(
+      u,
+      {
+        headers: {
+          'X-API-Key': key,
+          Accept: 'application/json',
+        },
+      },
+      timeoutMs,
+    );
+    const text = await r.text();
+    if (!r.ok) throw providerError(classify(r.status), r.status, text.slice(0, 200));
+    let j;
+    try {
+      j = JSON.parse(text);
+    } catch {
+      throw providerError('transient', r.status, 'invalid JSON from tinyfish');
+    }
+    if (j.error && !j.results) {
+      // API returned structured error with 200 or 4xx body
+      const msg = typeof j.error === 'string' ? j.error : JSON.stringify(j.error).slice(0, 200);
+      throw providerError(classify(r.status || 400), r.status || 400, msg);
+    }
+    return (j.results || []).slice(0, num).map((x) => ({
+      title: x.title || '',
+      url: x.url || '',
+      snippet: (x.snippet || x.description || '').replace(/\s+/g, ' ').trim(),
+      published: x.date || x.published || null,
+      source: 'tinyfish',
+    }));
+  },
+};
+
+const KEY_ENV = {
+  searxng: 'SEARXNG_URL', // instance base URL, not a secret
+  linkup: 'LINKUP_API_KEY',
+  parallel: 'PARALLEL_API_KEY',
+  youcom: 'YDC_API_KEY', // canonical name in You.com's own docs/SDKs
+  tavily: 'TAVILY_API_KEY',
+  brave: 'BRAVE_API_KEY',
+  jina: 'JINA_API_KEY',
+  exa: 'EXA_API_KEY',
+  tinyfish: 'TINYFISH_API_KEY',
+  marginalia: 'MARGINALIA_API_KEY', // unused — marginalia is in KEYLESS
+};
+
+// ----------------------------------------------------------------------- args
+function parseArgs(argv) {
+  const o = { num: 5, order: null, provider: null, json: null, timeout: 15000, quiet: false, query: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '-n' || a === '--num') o.num = Math.max(1, parseInt(argv[++i], 10) || 5);
+    else if (a === '--provider' || a === '-p') o.provider = argv[++i];
+    else if (a === '--order') o.order = argv[++i].split(',').map((s) => s.trim());
+    else if (a === '--json') o.json = true;
+    else if (a === '--pretty') o.json = false;
+    else if (a === '--timeout') o.timeout = Math.max(1000, parseInt(argv[++i], 10) || 15000);
+    else if (a === '--quiet' || a === '-q') o.quiet = true;
+    else if (a === '-h' || a === '--help') o.help = true;
+    else if (a === 'keys') o.cmd = 'keys';
+    else if (a.startsWith('-')) {
+      process.stderr.write(`websearch: unknown flag ${a}\n`);
+      process.exit(2);
+    } else o.query.push(a);
+  }
+  return o;
+}
+
+const HELP = `websearch — stacked free-tier web search with failover
+
+USAGE
+  websearch [options] <query…>
+  websearch keys              show which providers have keys + signup links
+
+OPTIONS
+  -n, --num N        results to return (default 5)
+  -p, --provider P   force one provider (tavily|brave|jina|exa|tinyfish)
+      --order a,b,c  override priority order
+      --json         force JSON output (default when piped/non-TTY)
+      --pretty       force human output (default when interactive)
+      --timeout MS   per-provider timeout (default 15000)
+  -q, --quiet        suppress provider-attempt breadcrumbs on stderr
+  -h, --help
+
+EXIT CODES   0 ok · 2 usage · 3 all providers exhausted · 4 no keys
+KEYS         env TAVILY_API_KEY BRAVE_API_KEY JINA_API_KEY EXA_API_KEY TINYFISH_API_KEY
+             or ~/.config/websearch/keys.json
+             Exa auto-read from ~/.claude.json; TinyFish from ~/.tinyfish/config.json
+
+EXAMPLE (skill/hook)
+  websearch "latest claude opus pricing" -n 5 --json
+  websearch "breaking news" -p tinyfish -n 8 --json`;
+
+// ----------------------------------------------------------------------- main
+const opts = parseArgs(process.argv.slice(2));
+const wantJson = opts.json === null ? !process.stdout.isTTY : opts.json;
+const log = (s) => {
+  if (!opts.quiet) process.stderr.write(s);
+};
+
+if (opts.help) {
+  process.stdout.write(`${HELP}\n`);
+  process.exit(0);
+}
+
+const keys = loadKeys();
+
+if (opts.cmd === 'keys') {
+  const rows = DEFAULT_ORDER.map((p) => {
+    const keyless = KEYLESS.has(p);
+    const have = keyless || !!keys[KEY_ENV[p]];
+    const note = keyless ? 'keyless' : have ? 'key set' : `no key  → ${SIGNUP[p]}`;
+    return `  ${have ? '✓' : '·'} ${p.padEnd(10)} ${note}`;
+  });
+  const n = DEFAULT_ORDER.filter((p) => KEYLESS.has(p) || keys[KEY_ENV[p]]).length;
+  process.stdout.write(`Search providers (${n}/${DEFAULT_ORDER.length} configured):\n${rows.join('\n')}\n`);
+  process.exit(0);
+}
+
+if (opts.query.length === 0) {
+  process.stderr.write(`${HELP}\n`);
+  process.exit(2);
+}
+
+const query = opts.query.join(' ');
+let order = opts.order || (opts.provider ? [opts.provider] : DEFAULT_ORDER.slice());
+order = order.filter((p) => PROVIDERS[p]);
+const usable = order.filter((p) => KEYLESS.has(p) || keys[KEY_ENV[p]]);
+
+if (usable.length === 0) {
+  process.stderr.write(
+    `websearch: no API keys for any provider (${order.join(', ')}).\n` +
+      `Add at least one free key, then retry. Run 'websearch keys' for signup links.\n`,
+  );
+  process.exit(4);
+}
+
+const attempts = [];
+for (const p of usable) {
+  log(`→ ${p}… `);
+  try {
+    const results = await PROVIDERS[p](query, opts.num, keys[KEY_ENV[p]], opts.timeout);
+    log(`✓ ${results.length} result(s)\n`);
+    // A provider that returns ZERO results is NOT a success — it silently ended the
+    // search and the caller saw "the web has nothing". Fall through to the next
+    // provider; only accept an empty answer once every provider has been tried.
+    if (results.length === 0 && p !== usable[usable.length - 1]) {
+      attempts.push({ provider: p, kind: 'empty', status: 200, message: '0 results' });
+      continue;
+    }
+    const payload = { query, provider: p, count: results.length, attempts, results };
+    if (wantJson) {
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    } else {
+      process.stdout.write(`\n${results.length} results for "${query}" via ${p}:\n\n`);
+      results.forEach((x, i) => {
+        process.stdout.write(`${i + 1}. ${x.title}\n   ${x.url}\n`);
+        if (x.snippet) process.stdout.write(`   ${x.snippet}\n`);
+        process.stdout.write('\n');
+      });
+    }
+    process.exit(0);
+  } catch (e) {
+    const tag = e.kind === 'exhausted' ? 'exhausted' : e.kind === 'auth' ? 'bad key' : 'error';
+    log(`✗ ${tag}${e.status ? ` (${e.status})` : ''}\n`);
+    attempts.push({ provider: p, kind: e.kind, status: e.status, message: e.message });
+    // auth failures and exhaustion both → just move on to the next provider.
+  }
+}
+
+// Every usable provider failed.
+const summary = { query, error: 'all_providers_failed', attempts };
+if (wantJson) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+else {
+  process.stderr.write(`All ${usable.length} provider(s) failed:\n`);
+  for (const a of attempts) process.stderr.write(`  ${a.provider}: ${a.kind} ${a.status || ''} ${a.message || ''}\n`);
+}
+process.exit(3);

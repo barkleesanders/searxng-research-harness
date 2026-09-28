@@ -1,0 +1,9 @@
+# Never commit real keys or a running instance
+keys.json
+.config/
+searxng-native/
+searxng-src/
+venv/
+*.log
+*.bak-*
+.DS_Store
