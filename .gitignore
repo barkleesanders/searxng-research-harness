@@ -23,3 +23,8 @@ venv/
 .cursor/
 CLAUDE.md
 AGENTS.md
+
+# Benchmark raw output (large; summaries are kept)
+bench/results-*.json
+bench/facts-*.json
+bench/v2-2*.json

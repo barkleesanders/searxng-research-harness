@@ -13,3 +13,15 @@ search:
   formats:
     - html
     - json
+# More upstream engines, so one engine being rate-limited (suspended ~3 min) does not
+# empty the results. With the defaults alone (Google CSE, Brave, DuckDuckGo), 38 of 60
+# rapid benchmark queries came back empty; with these added, 60 of 60 answered.
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: yep
+    disabled: false

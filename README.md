@@ -20,6 +20,46 @@ it transparently moves to the next. Piped output is JSON; interactive output is
 human-readable. Typed exit codes: `0` results, `2` usage error, `3` all providers
 exhausted, `4` no usable keys.
 
+## How the order is chosen
+
+The order is not fixed. Each search:
+
+1. **Guesses the intent** from the query — `fresh` (news, "latest", "today"), `code`
+   (errors, `foo()`, "how to … in python"), `facts` ("what / who / when / how many"),
+   otherwise `general`. Override with `--intent nav|facts|fresh|code|smallweb|general`.
+2. **Ranks providers by measured quality for that intent** (table below), with a small
+   bonus for unmetered providers so they win ties.
+3. **Multiplies by a budget pace factor.** Every call is counted in
+   `~/.cache/websearch/usage.json`. A metered provider that is ahead of its pro-rata
+   share of this period's free allowance slides down; one that has used it all goes to the
+   back. Monthly allowances reset on the 1st; one-time credits (You.com) are paced over a
+   year. The unmetered providers (SearXNG, TinyFish, Marginalia) absorb the rest.
+4. **Demotes anything in cooldown** (see below).
+
+`websearch quota` shows use against each free allowance and pulls live balances where the
+provider exposes one (Linkup, Tavily). `--static` (or `WEBSEARCH_ROUTING=static`) uses
+the fixed order instead; `-p` / `--order` are always honored as given.
+
+### Quality table (2026-09-28, 60 queries)
+
+| Provider | Free allowance | nav | facts | fresh | smallweb | code | overall |
+|---|---|---|---|---|---|---|---|
+| Brave | ~1,000/mo | 0.88 | 0.73 | **0.80** | 0.78 | **1.00** | **0.84** |
+| You.com | $100 one-time (~20k) | 0.91 | 0.65 | **0.80** | 0.78 | **1.00** | 0.83 |
+| Exa | ~830/mo | 0.97 | 0.66 | **0.80** | **0.88** | 0.83 | 0.83 |
+| TinyFish | unmetered (30/min) | 0.96 | 0.88 | 0.20 | 0.85 | **1.00** | 0.78 |
+| SearXNG | unmetered (self-hosted) | 0.95 | 0.80 | 0.25 | **0.88** | 0.84 | 0.74 |
+| Parallel | ~5,000/mo | **1.00** | 0.78 | 0.10 | 0.81 | 0.88 | 0.71 |
+| Tavily | 1,000/mo | 0.64 | **1.00** | 0.33 | 0.38 | 0.52 | 0.58 |
+| Linkup | ~4,000/mo | 0.20 | 0.79 | 0.23 | 0.20 | 0.40 | 0.36 |
+| Jina | one-time, empty | — | — | — | — | — | 402 |
+| Marginalia | shared public key | — | — | — | — | — | 429 daily limit |
+
+nav/smallweb/code = rank of the official page (1.0 = always first); facts = the known
+answer appears in the top snippet; fresh = share of top-5 results dated in the last 14
+days. Re-measure with `bench/bench2.py` — it rewrites `~/.config/websearch/quality.json`,
+which the router reads, so the order follows the latest numbers.
+
 ## Cooldown
 
 A provider that answers 402, 429, or 432 (quota exhausted) is moved to the end of
@@ -28,14 +68,12 @@ tried as a last resort, so a cooldown never turns into a false "all providers
 failed". `-p`/`--order` ignore it; `--no-cooldown` skips it for one run;
 `WEBSEARCH_COOLDOWN_MIN=0` turns it off. `websearch keys` shows what is cooling down.
 
-## Provider order
+## Fallback order (`--static`, and tie-breaker)
 
 ```
 searxng → linkup → parallel → youcom → tavily → brave → jina → exa → tinyfish → marginalia
 ```
 
-Unmetered SearXNG first (absorbs volume); then by recurring free allowance, largest
-first; independent indexes (TinyFish, Marginalia) held for deliberate second-source use.
 A provider with no key is skipped, so an unkeyed entry is simply inert.
 
 ## Requirements
@@ -122,6 +160,7 @@ websearch "q" --json -n 5 2>/dev/null | sed -n '/^{/,$p' | jq .
 | `searxng/build-native-searxng.sh` | install native SearXNG (venv, no container) |
 | `searxng/settings.yml.template` | reference SearXNG config (JSON API on) |
 | `searxng/com.example.searxng-native.plist.template` | macOS LaunchAgent template |
+| `bench/bench2.py`, `bench/suite2.json` | 60-query provider benchmark; rewrites `~/.config/websearch/quality.json` |
 
 ## License
 

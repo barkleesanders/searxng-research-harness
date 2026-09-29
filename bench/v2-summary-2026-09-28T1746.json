@@ -1,0 +1,136 @@
+{
+ "searxng": {
+  "nav": 1.0,
+  "facts": 0.317,
+  "smallweb": 0.0,
+  "code": 0.0,
+  "fresh": 0.475,
+  "answered": "60/60",
+  "p50": 1.08,
+  "p90": 3.14,
+  "errors": [],
+  "quality": 0.358,
+  "overlap": 0.258
+ },
+ "linkup": {
+  "nav": 0.198,
+  "facts": 0.785,
+  "smallweb": 0.197,
+  "code": 0.4,
+  "fresh": 0.225,
+  "answered": "60/60",
+  "p50": 1.48,
+  "p90": 1.95,
+  "errors": [],
+  "quality": 0.361,
+  "overlap": 0.076
+ },
+ "parallel": {
+  "nav": 1.0,
+  "facts": 0.777,
+  "smallweb": 0.812,
+  "code": 0.875,
+  "fresh": 0.1,
+  "answered": "60/60",
+  "p50": 0.91,
+  "p90": 1.1,
+  "errors": [],
+  "quality": 0.713,
+  "overlap": 0.127
+ },
+ "youcom": {
+  "nav": 0.911,
+  "facts": 0.649,
+  "smallweb": 0.781,
+  "code": 1.0,
+  "fresh": 0.8,
+  "answered": "60/60",
+  "p50": 1.15,
+  "p90": 1.59,
+  "errors": [],
+  "quality": 0.828,
+  "overlap": 0.333
+ },
+ "tavily": {
+  "nav": 0.642,
+  "facts": 1.0,
+  "smallweb": 0.384,
+  "code": 0.522,
+  "fresh": 0.325,
+  "answered": "60/60",
+  "p50": 1.68,
+  "p90": 2.5,
+  "errors": [],
+  "quality": 0.575,
+  "overlap": 0.275
+ },
+ "brave": {
+  "nav": 0.88,
+  "facts": 0.727,
+  "smallweb": 0.781,
+  "code": 1.0,
+  "fresh": 0.8,
+  "answered": "60/60",
+  "p50": 0.64,
+  "p90": 0.84,
+  "errors": [],
+  "quality": 0.838,
+  "overlap": 0.329
+ },
+ "jina": {
+  "nav": 0.0,
+  "facts": 0.0,
+  "smallweb": 0.0,
+  "code": 0.0,
+  "fresh": 0.0,
+  "answered": "0/60",
+  "p50": null,
+  "p90": null,
+  "errors": [
+   "exhausted 402"
+  ],
+  "quality": 0.0,
+  "overlap": null
+ },
+ "exa": {
+  "nav": 0.969,
+  "facts": 0.66,
+  "smallweb": 0.875,
+  "code": 0.833,
+  "fresh": 0.8,
+  "answered": "60/60",
+  "p50": 1.58,
+  "p90": 2.11,
+  "errors": [],
+  "quality": 0.827,
+  "overlap": 0.1
+ },
+ "tinyfish": {
+  "nav": 0.958,
+  "facts": 0.875,
+  "smallweb": 0.854,
+  "code": 1.0,
+  "fresh": 0.2,
+  "answered": "60/60",
+  "p50": 1.2,
+  "p90": 1.68,
+  "errors": [],
+  "quality": 0.777,
+  "overlap": 0.298
+ },
+ "marginalia": {
+  "nav": 0.0,
+  "facts": 0.0,
+  "smallweb": 0.0,
+  "code": 0.0,
+  "fresh": 0.0,
+  "answered": "0/60",
+  "p50": null,
+  "p90": null,
+  "errors": [
+   "exhausted 429"
+  ],
+  "quality": 0.0,
+  "overlap": null
+ }
+}

@@ -1,0 +1,72 @@
+{
+"nav":[
+ {"q":"opentelemetry collector configuration receivers","expect":["opentelemetry.io"]},
+ {"q":"postgres jsonb_path_query function","expect":["postgresql.org"]},
+ {"q":"nginx proxy_buffering directive","expect":["nginx.org"]},
+ {"q":"kubernetes pod disruption budget","expect":["kubernetes.io"]},
+ {"q":"terraform aws_s3_bucket_lifecycle_configuration resource","expect":["registry.terraform.io"]},
+ {"q":"swift concurrency actor isolation","expect":["docs.swift.org","developer.apple.com","swift.org"]},
+ {"q":"IRS form 8962 instructions","expect":["irs.gov"]},
+ {"q":"VA form 21-526EZ","expect":["va.gov"]},
+ {"q":"USCIS I-90 renew green card","expect":["uscis.gov"]},
+ {"q":"New York consumer directed personal assistance program","expect":["health.ny.gov"]},
+ {"q":"byzantine fault tolerance wikipedia","expect":["wikipedia.org"]},
+ {"q":"attention is all you need arxiv","expect":["arxiv.org"]},
+ {"q":"zig language reference comptime","expect":["ziglang.org"]},
+ {"q":"htmx hx-swap attribute","expect":["htmx.org"]},
+ {"q":"caddy reverse_proxy directive","expect":["caddyserver.com"]},
+ {"q":"sqlite fts5 bm25 ranking function","expect":["sqlite.org"]}
+],
+"facts":[
+ {"q":"what year was the eiffel tower completed","a":["1889"]},
+ {"q":"speed of light in meters per second exact","a":["299,792,458","299792458","299 792 458"]},
+ {"q":"python 3.13 release date","a":["october 7, 2024","2024-10-07","oct 7, 2024","7 october 2024","october 2024"]},
+ {"q":"http status code 418 meaning","a":["teapot"]},
+ {"q":"which rfc defines http/3","a":["9114"]},
+ {"q":"mount everest height in meters","a":["8,848","8848","8,849","8849"]},
+ {"q":"sqlite maximum database size","a":["281 terabytes","281 tb","281tb","281 tib","281tib"]},
+ {"q":"who wrote the grug brained developer","a":["carson gross"]},
+ {"q":"capital of australia","a":["canberra"]},
+ {"q":"rust 1.0 stable release date","a":["may 15, 2015","15 may 2015","2015-05-15"]},
+ {"q":"apple container default memory for a container vm","a":["1 gigabyte","1 gib","1gb","1 gb"]},
+ {"q":"38 cfr 4.130 100 percent rating criteria","a":["total occupational and social impairment"]},
+ {"q":"linux kernel first released year linus torvalds","a":["1991"]},
+ {"q":"deepest point in the ocean depth meters","a":["10,9","10 9","10,93","10,99","10,98","11,0"]},
+ {"q":"boiling point of ethanol in celsius","a":["78.3","78.37","78.4","78.2","78 °c","78°c"]},
+ {"q":"how many bones in the adult human body","a":["206"]},
+ {"q":"original iphone release date","a":["june 29, 2007","29 june 2007"]},
+ {"q":"atomic number of gold","a":["79"]},
+ {"q":"who wrote the art of computer programming","a":["knuth"]},
+ {"q":"what does TCP stand for","a":["transmission control protocol"]}
+],
+"fresh":[
+ {"q":"AI model release news this week"},
+ {"q":"latest SpaceX launch"},
+ {"q":"stock market today"},
+ {"q":"NFL week 4 scores"},
+ {"q":"Federal Reserve latest interest rate decision"},
+ {"q":"Anthropic news"},
+ {"q":"hurricane forecast update"},
+ {"q":"San Francisco news today"}
+],
+"smallweb":[
+ {"q":"the grug brained developer","expect":["grugbrain.dev"]},
+ {"q":"joel spolsky law of leaky abstractions","expect":["joelonsoftware.com"]},
+ {"q":"julia evans wizard zines","expect":["jvns.ca","wizardzines.com"]},
+ {"q":"gwern spaced repetition","expect":["gwern.net"]},
+ {"q":"bret victor inventing on principle","expect":["worrydream.com"]},
+ {"q":"hillel wayne formal methods","expect":["hillelwayne.com","buttondown.com/hillelwayne"]},
+ {"q":"dan luu keyboard latency","expect":["danluu.com"]},
+ {"q":"paul graham how to do great work","expect":["paulgraham.com"]}
+],
+"code":[
+ {"q":"python TypeError NoneType object is not subscriptable","expect":["stackoverflow.com","docs.python.org"]},
+ {"q":"git undo last commit keep changes","expect":["stackoverflow.com","git-scm.com"]},
+ {"q":"rust cannot borrow as mutable more than once at a time","expect":["stackoverflow.com","doc.rust-lang.org","users.rust-lang.org"]},
+ {"q":"javascript array flatMap","expect":["developer.mozilla.org"]},
+ {"q":"css grid-template-areas","expect":["developer.mozilla.org","css-tricks.com"]},
+ {"q":"bash check if file exists","expect":["stackoverflow.com","askubuntu.com","unix.stackexchange.com","linuxize.com"]},
+ {"q":"typescript satisfies operator","expect":["typescriptlang.org"]},
+ {"q":"go context withtimeout example","expect":["pkg.go.dev","go.dev"]}
+]
+}

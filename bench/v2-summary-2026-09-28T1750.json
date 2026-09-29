@@ -1,0 +1,15 @@
+{
+ "searxng": {
+  "nav": 0.948,
+  "facts": 0.8,
+  "smallweb": 0.875,
+  "code": 0.844,
+  "fresh": 0.25,
+  "answered": "60/60",
+  "p50": 0.99,
+  "p90": 3.17,
+  "errors": [],
+  "quality": 0.743,
+  "overlap": null
+ }
+}

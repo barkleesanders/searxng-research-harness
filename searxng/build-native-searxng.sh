@@ -60,8 +60,20 @@ search:
   formats:
     - html
     - json
+# More upstream engines, so one engine being rate-limited (suspended ~3 min) does not
+# empty the results. With the defaults alone (Google CSE, Brave, DuckDuckGo), 38 of 60
+# rapid benchmark queries came back empty; with these added, 60 of 60 answered.
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: yep
+    disabled: false
 YML
-  say "wrote $SRC/settings.yml (127.0.0.1:8888, formats html+json, fresh secret)"
+  say "wrote $SRC/settings.yml (127.0.0.1:8888, formats html+json, 7 web engines, fresh secret)"
 else
   say "settings.yml exists — left as-is (delete it to regenerate)"
 fi

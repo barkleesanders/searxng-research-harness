@@ -50,6 +50,77 @@ const DEFAULT_ORDER = [
 // Providers that need no credential at all (gated on reachability, not a key).
 const KEYLESS = new Set(['marginalia']);
 
+// ------------------------------------------------------------------ routing
+// The default order is not fixed: each search ranks the usable providers by measured
+// quality for the kind of query (intent), times a budget "pace" factor that slides a
+// metered provider down once it is ahead of its free allowance for the period. So the
+// best provider goes first while it can afford to, and the unmetered ones absorb the
+// rest. DEFAULT_ORDER above is only the tie-breaker (and the order under --static).
+//
+// Free allowance per provider, from each provider's own pricing/docs page (2026-09-28).
+// period: 'month' (resets monthly), 'once' (one-time credit, paced over a year), or
+// null (unmetered — rate-limited but no quota).
+const BUDGET = {
+  searxng: { period: null }, // self-hosted; upstream engines throttle bursts
+  tinyfish: { period: null }, // search API is $0; 30 req/min on pay-as-you-go
+  marginalia: { period: null }, // shared `public` key is rate-limited daily
+  linkup: { allowance: 4000, period: 'month' }, // $20/mo credit at $0.005 (standard)
+  parallel: { allowance: 5000, period: 'month' }, // $5/mo credit at $1/1k
+  youcom: { allowance: 20000, period: 'once' }, // $100 one-time credit at $5/1k
+  tavily: { allowance: 1000, period: 'month' }, // 1,000 credits, resets on the 1st
+  brave: { allowance: 1000, period: 'month' }, // $5/mo credit at $5/1k
+  exa: { allowance: 830, period: 'month' }, // $10/mo at ~$12/1k (search + text)
+  jina: { allowance: 1000, period: 'once' }, // one-time 10M tokens
+};
+
+// Measured quality per intent: MRR of the official page (nav, smallweb, code), MRR of
+// the known answer in title+snippet (facts), share of results dated within 14 days
+// (fresh). From bench/bench2.py, 60 queries, 2026-09-28. bench2.py rewrites
+// ~/.config/websearch/quality.json after each run, which overrides these values, so
+// re-running the benchmark re-ranks the stack.
+const QUALITY_DEFAULT = {
+  searxng: { nav: 0.948, facts: 0.8, fresh: 0.25, smallweb: 0.875, code: 0.844 },
+  linkup: { nav: 0.198, facts: 0.785, fresh: 0.225, smallweb: 0.197, code: 0.4 },
+  parallel: { nav: 1.0, facts: 0.777, fresh: 0.1, smallweb: 0.812, code: 0.875 },
+  youcom: { nav: 0.911, facts: 0.649, fresh: 0.8, smallweb: 0.781, code: 1.0 },
+  tavily: { nav: 0.642, facts: 1.0, fresh: 0.325, smallweb: 0.384, code: 0.522 },
+  brave: { nav: 0.88, facts: 0.727, fresh: 0.8, smallweb: 0.781, code: 1.0 },
+  exa: { nav: 0.969, facts: 0.66, fresh: 0.8, smallweb: 0.875, code: 0.833 },
+  tinyfish: { nav: 0.958, facts: 0.875, fresh: 0.2, smallweb: 0.854, code: 1.0 },
+};
+const INTENTS = ['nav', 'facts', 'fresh', 'code', 'smallweb'];
+// Unmetered providers win ties: a difference this small is inside benchmark noise.
+const UNMETERED_BONUS = 0.05;
+
+// Cheap keyword heuristics. Wrong guesses cost little — every provider is still tried
+// in order — and --intent overrides.
+function detectIntent(q) {
+  const s = q.toLowerCase();
+  if (
+    /\b(today|tonight|yesterday|this (week|month)|latest|breaking|news|headlines|right now|currently|live score|scores|stock market|forecast|weather|election results?)\b/.test(
+      s,
+    )
+  )
+    return 'fresh';
+  if (
+    /\b(error|exception|traceback|typeerror|valueerror|segfault|stack ?trace|undefined is not|cannot find module|npm err|syntax error|compile error|borrow checker)\b/.test(
+      s,
+    ) ||
+    /\b(how (do i|to) .* in (python|javascript|js|typescript|ts|rust|go|golang|bash|sql|swift|java|c\+\+|css|git))\b/.test(
+      s,
+    ) ||
+    /[a-z_]+\(\)|::|=>|\.[a-z_]+\(/i.test(q)
+  )
+    return 'code';
+  if (
+    /^(what|who|whom|when|where|which|why|how (many|much|tall|old|long|far|big|fast|deep|high)|is|are|was|were|does|do|did|can|define|meaning of)\b/.test(
+      s,
+    )
+  )
+    return 'facts';
+  return 'general';
+}
+
 const SIGNUP = {
   searxng: 'self-host, unmetered: see ~/tools/searxng-local/ then set SEARXNG_URL',
   linkup: 'https://app.linkup.so  (free $20/mo credit ≈ 4,000 searches; pro email)',
@@ -296,10 +367,15 @@ const PROVIDERS = {
   // Marginalia — independent crawler indexing the small/non-commercial web.
   // Keyless public endpoint; complements the mainstream indexes rather than
   // duplicating them. Results are CC-BY-NC-SA.
-  async marginalia(query, num, _key, timeoutMs) {
+  // api2.marginalia-search.com replaced api.marginalia.nu (docs updated 2025-12-08); the old
+  // host now hangs until timeout. The shared `public` key is often rate-limited (429);
+  // a free personal non-commercial key (email contact@marginalia-search.com) goes in
+  // MARGINALIA_API_KEY.
+  async marginalia(query, num, key, timeoutMs) {
+    const u = `https://api2.marginalia-search.com/search?query=${encodeURIComponent(query)}&count=${num}`;
     const r = await doFetch(
-      `https://api.marginalia.nu/public/search/${encodeURIComponent(query)}`,
-      { headers: { Accept: 'application/json' } },
+      u,
+      { headers: { Accept: 'application/json', 'API-Key': key || 'public' } },
       timeoutMs,
     );
     const text = await r.text();
@@ -469,7 +545,7 @@ const KEY_ENV = {
   jina: 'JINA_API_KEY',
   exa: 'EXA_API_KEY',
   tinyfish: 'TINYFISH_API_KEY',
-  marginalia: 'MARGINALIA_API_KEY', // unused — marginalia is in KEYLESS
+  marginalia: 'MARGINALIA_API_KEY', // optional personal key; falls back to the shared `public` key
 };
 
 // ----------------------------------------------------------------------- args
@@ -485,6 +561,9 @@ function parseArgs(argv) {
     else if (a === '--timeout') o.timeout = Math.max(1000, parseInt(argv[++i], 10) || 15000);
     else if (a === '--quiet' || a === '-q') o.quiet = true;
     else if (a === '--no-cooldown') o.cooldown = false;
+    else if (a === '--intent') o.intent = argv[++i];
+    else if (a === '--static') o.static = true;
+    else if (a === 'quota' && o.query.length === 0) o.cmd = 'quota';
     else if (a === '-h' || a === '--help') o.help = true;
     else if (a === 'keys') o.cmd = 'keys';
     else if (a.startsWith('-')) {
@@ -500,6 +579,8 @@ const HELP = `websearch — stacked free-tier web search with failover
 USAGE
   websearch [options] <query…>
   websearch keys              show which providers have keys + signup links
+  websearch quota             free-allowance use per provider (reads live balances where
+                              the API exposes them: linkup, tavily)
 
 OPTIONS
   -n, --num N        results to return (default 5)
@@ -511,6 +592,14 @@ OPTIONS
       --timeout MS   per-provider timeout (default 15000)
   -q, --quiet        suppress provider-attempt breadcrumbs on stderr
       --no-cooldown  try exhausted providers in normal order this run
+      --intent I     nav|facts|fresh|code|smallweb|general (default: guessed from query)
+      --static       use the fixed DEFAULT_ORDER instead of quality/budget ranking
+
+ROUTING      Default order = measured quality for the query's intent x budget pace.
+             A metered provider ahead of its free allowance for the period slides
+             down; unmetered ones (searxng, tinyfish, marginalia) absorb the rest.
+             Usage is counted in ~/.cache/websearch/usage.json. Re-run
+             bench/bench2.py to re-measure quality. WEBSEARCH_ROUTING=static = --static.
 
 COOLDOWN     A provider that returns 402/429/432 is moved to the END of the
              order for WEBSEARCH_COOLDOWN_MIN minutes (default 15; 0 disables).
@@ -553,6 +642,99 @@ function writeCooldown(state) {
   }
 }
 
+// -------------------------------------------------------------- usage + rank
+const USAGE_FILE = join(CACHE_DIR, 'websearch', 'usage.json');
+const QUALITY_FILE = join(HOME, '.config', 'websearch', 'quality.json');
+const monthKey = (t) => new Date(t).toISOString().slice(0, 7);
+
+function readJson(file) {
+  try {
+    const j = JSON.parse(readFileSync(file, 'utf8'));
+    return j && typeof j === 'object' ? j : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeJson(file, obj) {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(obj, null, 2)}\n`);
+  } catch {
+    // Usage accounting is advisory; never fail a search over it.
+  }
+}
+
+// Queries charged against the provider's current period.
+function usedThisPeriod(p, usage, t) {
+  const u = usage[p];
+  const b = BUDGET[p];
+  if (!u || !b?.period) return 0;
+  if (b.period === 'once') return u.total || 0;
+  return u.month === monthKey(t) ? u.count || 0 : 0;
+}
+
+// 1 while the provider is at or below its pro-rata share of the allowance (+2%); falls toward
+// 0.2 as it gets ahead of pace; 0.05 once the allowance is gone.
+function paceFactor(p, usage, t) {
+  const b = BUDGET[p];
+  if (!b?.period) return 1;
+  const used = usedThisPeriod(p, usage, t);
+  if (used >= b.allowance) return 0.05;
+  let elapsed;
+  if (b.period === 'month') {
+    const d = new Date(t);
+    const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+    const end = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+    elapsed = (t - start) / (end - start);
+  } else {
+    elapsed = Math.min(1, (t - (usage[p]?.first ?? t)) / (365 * 86_400_000));
+  }
+  // 2% slack so a handful of early queries doesn't reshuffle near-ties.
+  const ahead = used / b.allowance - elapsed - 0.02;
+  return ahead <= 0 ? 1 : Math.max(0.2, 1 - 2 * ahead);
+}
+
+function loadQuality() {
+  const q = { ...QUALITY_DEFAULT };
+  const file = readJson(QUALITY_FILE).providers || {};
+  for (const [p, v] of Object.entries(file)) q[p] = { ...(q[p] || {}), ...v };
+  return q;
+}
+
+function qualityFor(qual, p, intent) {
+  const v = qual[p];
+  if (!v) return 0;
+  if (intent === 'general') {
+    const xs = INTENTS.map((i) => v[i]).filter((x) => typeof x === 'number');
+    return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
+  }
+  return typeof v[intent] === 'number' ? v[intent] : 0;
+}
+
+function rankProviders(providers, intent, usage, t) {
+  const qual = loadQuality();
+  const scored = providers.map((p, i) => {
+    const bonus = BUDGET[p]?.period ? 0 : UNMETERED_BONUS;
+    const score = (qualityFor(qual, p, intent) + bonus) * paceFactor(p, usage, t);
+    return { p, i, score };
+  });
+  scored.sort((a, b) => b.score - a.score || a.i - b.i);
+  return scored;
+}
+
+function recordUsage(usage, p, t) {
+  const u = usage[p] || { month: monthKey(t), count: 0, total: 0, first: t };
+  if (u.month !== monthKey(t)) {
+    u.month = monthKey(t);
+    u.count = 0;
+  }
+  u.count = (u.count || 0) + 1;
+  u.total = (u.total || 0) + 1;
+  u.first = u.first || t;
+  usage[p] = u;
+}
+
 // ----------------------------------------------------------------------- main
 const opts = parseArgs(process.argv.slice(2));
 const wantJson = opts.json === null ? !process.stdout.isTTY : opts.json;
@@ -578,6 +760,54 @@ if (opts.cmd === 'keys') {
   });
   const n = DEFAULT_ORDER.filter((p) => KEYLESS.has(p) || keys[KEY_ENV[p]]).length;
   process.stdout.write(`Search providers (${n}/${DEFAULT_ORDER.length} configured):\n${rows.join('\n')}\n`);
+  process.exit(0);
+}
+
+if (opts.cmd === 'quota') {
+  const t = Date.now();
+  const usage = readJson(USAGE_FILE);
+  const live = {};
+  // Live balances, where the provider exposes one. These correct the local count.
+  const probes = {
+    linkup: async (key) => {
+      const r = await doFetch('https://api.linkup.so/v1/credits/balance', { headers: { Authorization: `Bearer ${key}` } }, 10000);
+      const j = await r.json();
+      if (typeof j.balance !== 'number') throw new Error('no balance');
+      return { used: Math.round((20 - j.balance) / 0.005), note: `$${j.balance.toFixed(2)} left` };
+    },
+    tavily: async (key) => {
+      const r = await doFetch('https://api.tavily.com/usage', { headers: { Authorization: `Bearer ${key}` } }, 10000);
+      const j = await r.json();
+      const used = j.account?.plan_usage;
+      if (typeof used !== 'number') throw new Error('no usage');
+      return { used, note: `${used}/${j.account.plan_limit} (live; can lag)` };
+    },
+  };
+  for (const [p, fn] of Object.entries(probes)) {
+    if (!keys[KEY_ENV[p]]) continue;
+    try {
+      live[p] = await fn(keys[KEY_ENV[p]]);
+      const u = usage[p] || { total: 0, first: t };
+      u.month = monthKey(t);
+      u.count = Math.max(u.count && u.month === monthKey(t) ? u.count : 0, live[p].used);
+      u.total = Math.max(u.total || 0, u.count);
+      usage[p] = u;
+    } catch (e) {
+      live[p] = { note: `live read failed: ${e.message}` };
+    }
+  }
+  writeJson(USAGE_FILE, usage);
+  process.stdout.write('provider    period  used/allowance   pace  notes\n');
+  for (const p of DEFAULT_ORDER) {
+    const have = KEYLESS.has(p) || !!keys[KEY_ENV[p]];
+    const b = BUDGET[p];
+    const used = usedThisPeriod(p, usage, t);
+    const alloc = b?.period ? `${used}/${b.allowance}` : `${usage[p]?.count || 0} (unmetered)`;
+    const note = !have ? 'no key' : live[p]?.note || '';
+    process.stdout.write(
+      `${p.padEnd(11)} ${(b?.period || '-').padEnd(7)} ${alloc.padEnd(16)} ${paceFactor(p, usage, t).toFixed(2).padStart(4)}  ${note}\n`,
+    );
+  }
   process.exit(0);
 }
 
@@ -607,10 +837,15 @@ const now = Date.now();
 const cooldown = COOLDOWN_MS ? readCooldown() : {};
 const cooling = (p) => cooldown[p] > now;
 const explicit = !!(opts.provider || opts.order);
+const usage = readJson(USAGE_FILE);
+const staticOrder = opts.static || process.env.WEBSEARCH_ROUTING === 'static';
+const intent = opts.intent && (INTENTS.includes(opts.intent) || opts.intent === 'general') ? opts.intent : detectIntent(query);
+const ranked = explicit || staticOrder ? usable : rankProviders(usable, intent, usage, now).map((x) => x.p);
 const tryOrder =
   opts.cooldown && COOLDOWN_MS && !explicit
-    ? [...usable.filter((p) => !cooling(p)), ...usable.filter(cooling)]
-    : usable;
+    ? [...ranked.filter((p) => !cooling(p)), ...ranked.filter(cooling)]
+    : ranked;
+if (!explicit) log(`intent=${intent} order=${tryOrder.join(',')}\n`);
 const coolingSet = new Set(tryOrder.filter(cooling));
 let cooldownDirty = false;
 const setCooldown = (p, until) => {
@@ -622,6 +857,7 @@ const setCooldown = (p, until) => {
 };
 const flushCooldown = () => {
   if (cooldownDirty) writeCooldown(cooldown);
+  writeJson(USAGE_FILE, usage);
 };
 
 const attempts = [];
@@ -629,6 +865,7 @@ for (const p of tryOrder) {
   log(`→ ${p}${coolingSet.has(p) ? ' (cooling down)' : ''}… `);
   try {
     const results = await PROVIDERS[p](query, opts.num, keys[KEY_ENV[p]], opts.timeout);
+    recordUsage(usage, p, Date.now());
     log(`✓ ${results.length} result(s)\n`);
     setCooldown(p, 0);
     // A provider that returns ZERO results is NOT a success — it silently ended the
@@ -639,7 +876,7 @@ for (const p of tryOrder) {
       continue;
     }
     flushCooldown();
-    const payload = { query, provider: p, count: results.length, attempts, results };
+    const payload = { query, intent, provider: p, count: results.length, order: tryOrder, attempts, results };
     if (wantJson) {
       process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     } else {
@@ -655,7 +892,11 @@ for (const p of tryOrder) {
     const tag = e.kind === 'exhausted' ? 'exhausted' : e.kind === 'auth' ? 'bad key' : 'error';
     log(`✗ ${tag}${e.status ? ` (${e.status})` : ''}\n`);
     attempts.push({ provider: p, kind: e.kind, status: e.status, message: e.message });
-    if (e.kind === 'exhausted') setCooldown(p, Date.now() + COOLDOWN_MS);
+    // A reached API that answered with an error still counts against most quotas.
+    if (e.status) recordUsage(usage, p, Date.now());
+    // Unmetered providers only rate-limit, so their cooldown is short.
+    const coolFor = BUDGET[p]?.period ? COOLDOWN_MS : Math.min(COOLDOWN_MS, 60_000);
+    if (e.kind === 'exhausted') setCooldown(p, Date.now() + coolFor);
     // auth failures and exhaustion both → just move on to the next provider.
   }
 }
