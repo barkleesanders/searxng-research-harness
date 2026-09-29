@@ -60,9 +60,13 @@ search:
   formats:
     - html
     - json
-# More upstream engines, so one engine being rate-limited (suspended ~3 min) does not
-# empty the results. With the defaults alone (Google CSE, Brave, DuckDuckGo), 38 of 60
-# rapid benchmark queries came back empty; with these added, 60 of 60 answered.
+# More upstream engines, so one engine being rate-limited does not empty the results.
+# The websearch CLI sends each query to only 4 of these in rotation (SEARXNG_FANOUT),
+# which spreads load and keeps any single engine from being throttled.
+# Measured 2026-09-28: with 6 engines already suspended, 64 queries at 1/s returned
+# 0 empty and 60/64 with the expected site in the top 5. Engines tested and left off:
+# baidu, qwant, seznam, sogou, yacy and others returned nothing from this host;
+# quark answers with a CAPTCHA. duckduckgo timed out on every request.
 engines:
   - name: google
     disabled: false
@@ -72,8 +76,26 @@ engines:
     disabled: false
   - name: yep
     disabled: false
+  - name: gmx
+    disabled: false
+  - name: naver
+    disabled: false
+  - name: resulthunter
+    disabled: false
+  - name: tusksearch
+    disabled: false
+  - name: zapmeta
+    disabled: false
+  - name: yandex
+    disabled: false
+  - name: fynd
+    disabled: false
+  - name: mwmbl
+    disabled: false
+  - name: duckduckgo
+    disabled: true
 YML
-  say "wrote $SRC/settings.yml (127.0.0.1:8888, formats html+json, 7 web engines, fresh secret)"
+  say "wrote $SRC/settings.yml (127.0.0.1:8888, formats html+json, 12 web engines, fresh secret)"
 else
   say "settings.yml exists — left as-is (delete it to regenerate)"
 fi

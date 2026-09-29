@@ -180,6 +180,108 @@ function loadKeys() {
   return keys;
 }
 
+// ------------------------------------------------------------------ searxng
+const SEARXNG_STATE = join(
+  process.env.XDG_CACHE_HOME || join(homedir(), '.cache'),
+  'websearch',
+  'searxng.json',
+);
+// Engines that are not web search even though SearXNG files them under "general".
+const SEARXNG_NOT_WEB = new Set([
+  'wikipedia',
+  'wikidata',
+  'currency',
+  'dictzone',
+  'lingva',
+  'mymemory translated',
+  'wolframalpha',
+  'wolframalpha_api',
+]);
+// How long to skip an engine the instance reported as failing, by reason.
+function suspendFor(reason) {
+  const r = reason.toLowerCase();
+  if (r.includes('captcha')) return 3_600_000;
+  if (
+    r.includes('too many') ||
+    r.includes('access denied') ||
+    r.includes('429') ||
+    r.includes('403')
+  )
+    return 180_000;
+  return 60_000; // timeouts, parse errors
+}
+
+// Enabled web engines on this instance, from its own /config (cached for an hour).
+async function searxngEngines(base, state, timeoutMs) {
+  if (
+    state.engines?.length &&
+    state.enginesBase === base &&
+    Date.now() - (state.enginesAt || 0) < 3_600_000
+  ) {
+    return state.engines;
+  }
+  try {
+    const r = await doFetch(
+      `${base}/config`,
+      { headers: { Accept: 'application/json' } },
+      Math.min(timeoutMs, 5000),
+    );
+    const j = await r.json();
+    const engines = (j.engines || [])
+      .filter(
+        (e) =>
+          e.enabled &&
+          (e.categories || []).includes('general') &&
+          !SEARXNG_NOT_WEB.has(e.name) &&
+          !(e.categories || []).some((c) => c === 'translate' || c === 'currency'),
+      )
+      .map((e) => e.name);
+    Object.assign(state, { engines, enginesBase: base, enginesAt: Date.now() });
+    return engines;
+  } catch {
+    return []; // unknown instance layout: fall back to one call with its defaults
+  }
+}
+
+async function searxngCall(base, query, engines, timeoutMs, state) {
+  const u = new URL(`${base}/search`);
+  u.searchParams.set('q', query);
+  u.searchParams.set('format', 'json');
+  if (engines) u.searchParams.set('engines', engines.join(','));
+  const r = await doFetch(u, { headers: { Accept: 'application/json' } }, timeoutMs);
+  const text = await r.text();
+  if (!r.ok) {
+    // 403 here almost always means json isn't in search.formats.
+    const hint =
+      r.status === 403
+        ? 'format=json disabled (see search.formats in settings.yml)'
+        : text.slice(0, 200);
+    throw providerError(r.status === 403 ? 'auth' : classify(r.status), r.status, hint);
+  }
+  let j;
+  try {
+    j = JSON.parse(text);
+  } catch {
+    // Docs say a disabled format 403s, but real instances (e.g. searx.be)
+    // answer 200 with the HTML page instead — same root cause, so say so.
+    const looksHtml = /^\s*</.test(text);
+    throw providerError(
+      'auth',
+      r.status,
+      looksHtml
+        ? 'instance returned HTML, not JSON — add json to search.formats in settings.yml'
+        : 'invalid JSON from searxng',
+    );
+  }
+  state.susp = state.susp || {};
+  const now = Date.now();
+  for (const [name, why] of j.unresponsive_engines || []) {
+    state.susp[name] = Math.max(state.susp[name] || 0, now + suspendFor(String(why)));
+  }
+  for (const [name, until] of Object.entries(state.susp)) if (until < now) delete state.susp[name];
+  return { results: j.results || [] };
+}
+
 // ------------------------------------------------------------------ providers
 // Each adapter: async (query, num, key, timeoutMs) -> normalized results array.
 // Throws { kind: 'exhausted' | 'auth' | 'transient', status, message } on failure.
@@ -194,7 +296,11 @@ async function doFetch(url, opts, timeoutMs) {
   try {
     return await fetch(url, { ...opts, signal: ctrl.signal });
   } catch (e) {
-    throw providerError('transient', 0, e.name === 'AbortError' ? 'timeout' : String(e.message || e));
+    throw providerError(
+      'transient',
+      0,
+      e.name === 'AbortError' ? 'timeout' : String(e.message || e),
+    );
   } finally {
     clearTimeout(t);
   }
@@ -212,34 +318,55 @@ const PROVIDERS = {
   // unmetered; `key` here is the instance base URL (SEARXNG_URL).
   // Requires `search.formats: [html, json]` in settings.yml — a public instance
   // with JSON disabled answers 403, which we surface as an auth-kind failure.
+  // Adaptive engine fan-out. SearXNG ranks by cross-engine agreement, so a normal
+  // query goes to every enabled engine (benched 0.689 quality vs 0.517 with 4-engine
+  // rotation, 2026-09-28). Under a burst (SEARXNG_BURST+ searches in the last minute),
+  // which is what gets upstream engines throttled or CAPTCHA'd for up to an hour, each
+  // query goes to SEARXNG_FANOUT engines (default 4) in rotation instead, skipping
+  // engines the instance reported as suspended, topping up if too few results come
+  // back. That cuts upstream requests per search from ~12 to ~4.
+  // SEARXNG_FANOUT=0 forces all engines always; SEARXNG_BURST=0 forces rotation always.
   async searxng(query, num, key, timeoutMs) {
     const base = String(key).replace(/\/+$/, '');
-    const u = new URL(`${base}/search`);
-    u.searchParams.set('q', query);
-    u.searchParams.set('format', 'json');
-    const r = await doFetch(u, { headers: { Accept: 'application/json' } }, timeoutMs);
-    const text = await r.text();
-    if (!r.ok) {
-      // 403 here almost always means json isn't in search.formats.
-      const hint = r.status === 403 ? 'format=json disabled (see search.formats in settings.yml)' : text.slice(0, 200);
-      throw providerError(r.status === 403 ? 'auth' : classify(r.status), r.status, hint);
+    const state = readJson(SEARXNG_STATE);
+    const now = Date.now();
+    state.recent = (state.recent || []).filter((t) => now - t < 60_000);
+    state.recent.push(now);
+    const burstAt = Number.parseInt(process.env.SEARXNG_BURST ?? '8', 10);
+    const bursting = state.recent.length > burstAt;
+    const fanout = bursting ? Number.parseInt(process.env.SEARXNG_FANOUT ?? '4', 10) : 0;
+    const pool = fanout > 0 ? await searxngEngines(base, state, timeoutMs) : [];
+    const t0 = Date.now();
+    let merged = [];
+    if (!pool.length) {
+      merged = (await searxngCall(base, query, null, timeoutMs, state)).results;
+    } else {
+      const want = Math.min(num, 5);
+      const seen = new Set();
+      const healthy = pool.filter((e) => !(state.susp?.[e] > Date.now()));
+      const order = healthy.length >= fanout ? healthy : pool;
+      let rot = (state.rot || 0) % order.length;
+      for (let batch = 0; batch < 3 && batch * fanout < order.length; batch++) {
+        const pick = [];
+        for (let k = 0; k < fanout && pick.length < order.length; k++)
+          pick.push(order[(rot + k) % order.length]);
+        rot = (rot + fanout) % order.length;
+        const left = timeoutMs - (Date.now() - t0);
+        if (left < 1500) break;
+        // wikipedia rides along on every call: it is an API, not a throttled scraper.
+        const { results } = await searxngCall(base, query, [...pick, 'wikipedia'], left, state);
+        for (const r of results) {
+          if (!seen.has(r.url)) {
+            seen.add(r.url);
+            merged.push(r);
+          }
+        }
+        if (merged.length >= want) break;
+      }
+      state.rot = rot;
     }
-    let j;
-    try {
-      j = JSON.parse(text);
-    } catch {
-      // Docs say a disabled format 403s, but real instances (e.g. searx.be)
-      // answer 200 with the HTML page instead — same root cause, so say so.
-      const looksHtml = /^\s*</.test(text);
-      throw providerError(
-        'auth',
-        r.status,
-        looksHtml
-          ? 'instance returned HTML, not JSON — add json to search.formats in settings.yml'
-          : 'invalid JSON from searxng',
-      );
-    }
-    return (j.results || []).slice(0, num).map((x) => ({
+    writeJson(SEARXNG_STATE, state);
+    return merged.slice(0, num).map((x) => ({
       title: x.title || '',
       url: x.url || '',
       snippet: (x.content || '').replace(/\s+/g, ' ').trim(),
@@ -341,7 +468,11 @@ const PROVIDERS = {
     const u = new URL('https://api.you.com/v1/search');
     u.searchParams.set('query', query);
     u.searchParams.set('count', String(Math.min(num, 20)));
-    const r = await doFetch(u, { headers: { 'X-API-Key': key, Accept: 'application/json' } }, timeoutMs);
+    const r = await doFetch(
+      u,
+      { headers: { 'X-API-Key': key, Accept: 'application/json' } },
+      timeoutMs,
+    );
     const text = await r.text();
     if (!r.ok) throw providerError(classify(r.status), r.status, text.slice(0, 200));
     let j;
@@ -355,7 +486,10 @@ const PROVIDERS = {
       title: x.title || '',
       url: x.url || '',
       // snippets is an array of query-relevant extracts; description is the fallback.
-      snippet: (Array.isArray(x.snippets) && x.snippets.length ? x.snippets.join(' ') : x.description || '')
+      snippet: (Array.isArray(x.snippets) && x.snippets.length
+        ? x.snippets.join(' ')
+        : x.description || ''
+      )
         .replace(/\s+/g, ' ')
         .trim()
         .slice(0, 400),
@@ -550,7 +684,16 @@ const KEY_ENV = {
 
 // ----------------------------------------------------------------------- args
 function parseArgs(argv) {
-  const o = { num: 5, order: null, provider: null, json: null, timeout: 15000, quiet: false, cooldown: true, query: [] };
+  const o = {
+    num: 5,
+    order: null,
+    provider: null,
+    json: null,
+    timeout: 15000,
+    quiet: false,
+    cooldown: true,
+    query: [],
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-n' || a === '--num') o.num = Math.max(1, parseInt(argv[++i], 10) || 5);
@@ -755,11 +898,14 @@ if (opts.cmd === 'keys') {
     const have = keyless || !!keys[KEY_ENV[p]];
     let note = keyless ? 'keyless' : have ? 'key set' : `no key  → ${SIGNUP[p]}`;
     const until = readCooldown()[p];
-    if (have && until > Date.now()) note += `  (cooling down ${Math.ceil((until - Date.now()) / 60_000)} min)`;
+    if (have && until > Date.now())
+      note += `  (cooling down ${Math.ceil((until - Date.now()) / 60_000)} min)`;
     return `  ${have ? '✓' : '·'} ${p.padEnd(10)} ${note}`;
   });
   const n = DEFAULT_ORDER.filter((p) => KEYLESS.has(p) || keys[KEY_ENV[p]]).length;
-  process.stdout.write(`Search providers (${n}/${DEFAULT_ORDER.length} configured):\n${rows.join('\n')}\n`);
+  process.stdout.write(
+    `Search providers (${n}/${DEFAULT_ORDER.length} configured):\n${rows.join('\n')}\n`,
+  );
   process.exit(0);
 }
 
@@ -770,13 +916,21 @@ if (opts.cmd === 'quota') {
   // Live balances, where the provider exposes one. These correct the local count.
   const probes = {
     linkup: async (key) => {
-      const r = await doFetch('https://api.linkup.so/v1/credits/balance', { headers: { Authorization: `Bearer ${key}` } }, 10000);
+      const r = await doFetch(
+        'https://api.linkup.so/v1/credits/balance',
+        { headers: { Authorization: `Bearer ${key}` } },
+        10000,
+      );
       const j = await r.json();
       if (typeof j.balance !== 'number') throw new Error('no balance');
       return { used: Math.round((20 - j.balance) / 0.005), note: `$${j.balance.toFixed(2)} left` };
     },
     tavily: async (key) => {
-      const r = await doFetch('https://api.tavily.com/usage', { headers: { Authorization: `Bearer ${key}` } }, 10000);
+      const r = await doFetch(
+        'https://api.tavily.com/usage',
+        { headers: { Authorization: `Bearer ${key}` } },
+        10000,
+      );
       const j = await r.json();
       const used = j.account?.plan_usage;
       if (typeof used !== 'number') throw new Error('no usage');
@@ -839,8 +993,12 @@ const cooling = (p) => cooldown[p] > now;
 const explicit = !!(opts.provider || opts.order);
 const usage = readJson(USAGE_FILE);
 const staticOrder = opts.static || process.env.WEBSEARCH_ROUTING === 'static';
-const intent = opts.intent && (INTENTS.includes(opts.intent) || opts.intent === 'general') ? opts.intent : detectIntent(query);
-const ranked = explicit || staticOrder ? usable : rankProviders(usable, intent, usage, now).map((x) => x.p);
+const intent =
+  opts.intent && (INTENTS.includes(opts.intent) || opts.intent === 'general')
+    ? opts.intent
+    : detectIntent(query);
+const ranked =
+  explicit || staticOrder ? usable : rankProviders(usable, intent, usage, now).map((x) => x.p);
 const tryOrder =
   opts.cooldown && COOLDOWN_MS && !explicit
     ? [...ranked.filter((p) => !cooling(p)), ...ranked.filter(cooling)]
@@ -876,7 +1034,15 @@ for (const p of tryOrder) {
       continue;
     }
     flushCooldown();
-    const payload = { query, intent, provider: p, count: results.length, order: tryOrder, attempts, results };
+    const payload = {
+      query,
+      intent,
+      provider: p,
+      count: results.length,
+      order: tryOrder,
+      attempts,
+      results,
+    };
     if (wantJson) {
       process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
     } else {
@@ -907,6 +1073,7 @@ const summary = { query, error: 'all_providers_failed', attempts };
 if (wantJson) process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 else {
   process.stderr.write(`All ${usable.length} provider(s) failed:\n`);
-  for (const a of attempts) process.stderr.write(`  ${a.provider}: ${a.kind} ${a.status || ''} ${a.message || ''}\n`);
+  for (const a of attempts)
+    process.stderr.write(`  ${a.provider}: ${a.kind} ${a.status || ''} ${a.message || ''}\n`);
 }
 process.exit(3);

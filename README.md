@@ -68,6 +68,26 @@ tried as a last resort, so a cooldown never turns into a false "all providers
 failed". `-p`/`--order` ignore it; `--no-cooldown` skips it for one run;
 `WEBSEARCH_COOLDOWN_MIN=0` turns it off. `websearch keys` shows what is cooling down.
 
+## SearXNG load spreading
+
+SearXNG ranks by how many engines agree, so a normal search goes to every enabled
+engine. Upstream engines throttle a single IP quickly, though: 16 fast searches
+were enough to get Google CAPTCHA'd for an hour. So once more than 8 searches have
+run in the last minute (`SEARXNG_BURST`), each search goes to only 4 engines
+(`SEARXNG_FANOUT`) in rotation. Engines the instance reports as throttled are
+skipped until they recover, and if too few results come back the next 4 are tried.
+State lives in `~/.cache/websearch/searxng.json`.
+
+Measured 2026-09-28, same conditions:
+
+| Mode | Quality | Empty in a 64-search burst |
+|---|---|---|
+| All engines per search | 0.689 | 0 |
+| 8 engines in rotation | 0.662 | — |
+| 4 engines in rotation | 0.517 | 0 |
+
+`SEARXNG_FANOUT=0` always uses every engine; `SEARXNG_BURST=0` always rotates.
+
 ## Fallback order (`--static`, and tie-breaker)
 
 ```
