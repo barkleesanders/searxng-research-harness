@@ -88,6 +88,35 @@ Measured 2026-09-28, same conditions:
 
 `SEARXNG_FANOUT=0` always uses every engine; `SEARXNG_BURST=0` always rotates.
 
+## Compared with the agents' built-in search
+
+20 queries from `bench/suite2.json` (5 docs lookups, 6 facts, 4 small-web, 5 code),
+run 2026-09-28. A hit means the expected site is in the top 5 results, or for facts
+the expected answer is in the returned text.
+
+| Search | Hits | Docs | Facts | Small web | Code | Median time |
+|---|---|---|---|---|---|---|
+| `websearch` (routed) | **20/20** | 5 | 6 | 4 | 5 | **0.6 s** |
+| Codex `web_search` | 19/20 | 5 | 6 | 4 | 4 | 23 s, ~40k tokens |
+| `websearch -p searxng` | 17/20 | 4 | 5 | 3 | 5 | 0.8 s |
+| Claude Code `WebSearch` | 16/20 | 5 | 6 | 2 | 3 | not timed |
+
+Twenty queries is a small sample: the gap to Codex is one query. The gap to Claude
+Code's `WebSearch` is in small-web and code questions, where it ranked blogs and
+tutorial farms above the canonical source (joelonsoftware.com, jvns.ca,
+git-scm.com, Stack Overflow). Claude and Codex both return a written answer, which is
+why they score perfectly on facts. The SearXNG-only row was measured while Google
+had CAPTCHA-blocked this IP. Scripts and raw results are in `bench/h2h/`.
+
+### Make it the default
+
+- **Claude Code**: install `integrations/claude-code/pre-websearch-to-cli.sh` and add
+  `integrations/claude-code/settings-snippet.json` to `~/.claude/settings.json`. The
+  first `WebSearch` for a query is redirected to the CLI, and an identical retry is
+  allowed, so agents without a shell still work. `CLAUDE_ALLOW_WEBSEARCH=1` turns
+  it off.
+- **Codex**: add `integrations/codex/AGENTS-snippet.md` to `~/.codex/AGENTS.md`.
+
 ## Fallback order (`--static`, and tie-breaker)
 
 ```

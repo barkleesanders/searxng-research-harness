@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "WebSearch",
+        "hooks": [
+          { "type": "command", "command": "~/.claude/skills/hooks/pre-websearch-to-cli.sh", "timeout": 5 }
+        ]
+      }
+    ]
+  }
+}

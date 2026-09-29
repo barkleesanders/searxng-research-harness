@@ -1,0 +1,9 @@
+{
+  "queries": 20,
+  "scoring": "expected site in top 5 URLs (nav, smallweb, code) or expected answer in returned text (facts)",
+  "websearch_routed": {"hits": 20, "nav": 5, "facts": 6, "smallweb": 4, "code": 5, "p50_s": 0.6},
+  "codex_web_search": {"hits": 19, "nav": 5, "facts": 6, "smallweb": 4, "code": 4, "p50_s": 23.3, "avg_tokens": 39533},
+  "claude_code_WebSearch": {"hits": 16, "nav": 5, "facts": 6, "smallweb": 2, "code": 3, "p50_s": null},
+  "websearch_searxng_only": {"hits": 17, "nav": 4, "facts": 5, "smallweb": 3, "code": 5, "p50_s": 0.8,
+    "note": "Google engine was CAPTCHA-blocked on this IP at the time, from earlier stress tests"}
+}

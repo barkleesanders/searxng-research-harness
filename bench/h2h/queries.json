@@ -1,0 +1,157 @@
+[
+ {
+  "c": "nav",
+  "q": "opentelemetry collector configuration receivers",
+  "expect": [
+   "opentelemetry.io"
+  ]
+ },
+ {
+  "c": "nav",
+  "q": "postgres jsonb_path_query function",
+  "expect": [
+   "postgresql.org"
+  ]
+ },
+ {
+  "c": "nav",
+  "q": "nginx proxy_buffering directive",
+  "expect": [
+   "nginx.org"
+  ]
+ },
+ {
+  "c": "nav",
+  "q": "kubernetes pod disruption budget",
+  "expect": [
+   "kubernetes.io"
+  ]
+ },
+ {
+  "c": "nav",
+  "q": "terraform aws_s3_bucket_lifecycle_configuration resource",
+  "expect": [
+   "registry.terraform.io"
+  ]
+ },
+ {
+  "c": "facts",
+  "q": "what year was the eiffel tower completed",
+  "a": [
+   "1889"
+  ]
+ },
+ {
+  "c": "facts",
+  "q": "speed of light in meters per second exact",
+  "a": [
+   "299,792,458",
+   "299792458",
+   "299 792 458"
+  ]
+ },
+ {
+  "c": "facts",
+  "q": "python 3.13 release date",
+  "a": [
+   "october 7, 2024",
+   "2024-10-07",
+   "oct 7, 2024",
+   "7 october 2024",
+   "october 2024"
+  ]
+ },
+ {
+  "c": "facts",
+  "q": "http status code 418 meaning",
+  "a": [
+   "teapot"
+  ]
+ },
+ {
+  "c": "facts",
+  "q": "which rfc defines http/3",
+  "a": [
+   "9114"
+  ]
+ },
+ {
+  "c": "facts",
+  "q": "mount everest height in meters",
+  "a": [
+   "8,848",
+   "8848",
+   "8,849",
+   "8849"
+  ]
+ },
+ {
+  "c": "smallweb",
+  "q": "the grug brained developer",
+  "expect": [
+   "grugbrain.dev"
+  ]
+ },
+ {
+  "c": "smallweb",
+  "q": "joel spolsky law of leaky abstractions",
+  "expect": [
+   "joelonsoftware.com"
+  ]
+ },
+ {
+  "c": "smallweb",
+  "q": "julia evans wizard zines",
+  "expect": [
+   "jvns.ca",
+   "wizardzines.com"
+  ]
+ },
+ {
+  "c": "smallweb",
+  "q": "gwern spaced repetition",
+  "expect": [
+   "gwern.net"
+  ]
+ },
+ {
+  "c": "code",
+  "q": "python TypeError NoneType object is not subscriptable",
+  "expect": [
+   "stackoverflow.com",
+   "docs.python.org"
+  ]
+ },
+ {
+  "c": "code",
+  "q": "git undo last commit keep changes",
+  "expect": [
+   "stackoverflow.com",
+   "git-scm.com"
+  ]
+ },
+ {
+  "c": "code",
+  "q": "rust cannot borrow as mutable more than once at a time",
+  "expect": [
+   "stackoverflow.com",
+   "doc.rust-lang.org",
+   "users.rust-lang.org"
+  ]
+ },
+ {
+  "c": "code",
+  "q": "javascript array flatMap",
+  "expect": [
+   "developer.mozilla.org"
+  ]
+ },
+ {
+  "c": "code",
+  "q": "css grid-template-areas",
+  "expect": [
+   "developer.mozilla.org",
+   "css-tricks.com"
+  ]
+ }
+]
